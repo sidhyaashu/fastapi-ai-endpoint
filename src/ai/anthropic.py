@@ -1,8 +1,8 @@
-from typing import AsyncGenerator, List, Dict, Any
+from typing import AsyncGenerator, List, Dict, Any, Tuple
 from anthropic import AsyncAnthropic
 from src.ai.base import APIlatform
-from src.schema import Message, ModelParameters
-
+from src.schema import Message, ModelParameters, TokenUsage
+from src.utils.token_counter import count_tokens as tiktoken_count
 
 class Anthropic(APIlatform):
     def __init__(self, api_key: str, model_name: str, system_prompt: str = None):
@@ -16,8 +16,8 @@ class Anthropic(APIlatform):
         messages: List[Message],
         parameters: ModelParameters,
         system_prompt_override: str = None,
-        json_mode: bool = False, # Anthropic does not support a dedicated JSON mode
-    ) -> str:
+        json_mode: bool = False,
+    ) -> Tuple[str, TokenUsage]:
 
         api_messages = [msg.model_dump() for msg in messages]
         api_parameters = self._prepare_parameters(parameters)
@@ -29,7 +29,14 @@ class Anthropic(APIlatform):
             system=final_system_prompt,
             **api_parameters,
         )
-        return response.content[0].text
+
+        token_usage = TokenUsage(
+            prompt_tokens=response.usage.input_tokens,
+            completion_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+        )
+
+        return response.content[0].text, token_usage
 
     async def stream_chat(
         self,
@@ -53,13 +60,12 @@ class Anthropic(APIlatform):
                 yield text
 
     def _prepare_parameters(self, parameters: ModelParameters) -> Dict[str, Any]:
-        """Prepares the parameters dictionary for the Anthropic API."""
         api_parameters = {}
-        # Anthropic requires max_tokens
         api_parameters["max_tokens"] = parameters.max_tokens if parameters and parameters.max_tokens else 1024
-
         if parameters:
             if parameters.temperature is not None:
                 api_parameters["temperature"] = parameters.temperature
-
         return api_parameters
+
+    def count_tokens(self, messages: List[Message]) -> int:
+        return tiktoken_count(messages)

@@ -16,10 +16,12 @@ from src.prompts.prompt import load_system_prompt
 from src.prompts.persona import get_persona_prompt
 from src.prompts.template import render_template
 from src.schema import ChatRequest, ChatResponse, Message, StreamResponse
-from src.memory.manager import memory_manager
+from src.memory.manager import MemoryManager, get_memory_manager
 from src.cache.manager import cache_manager
 from src.security.pii_masking import mask_pii_in_messages
-
+from src.utils.logger import logger
+from src.database.session import get_db
+import redis
 
 app = FastAPI(title="AI endpoint Using FastAPI")
 
@@ -35,6 +37,7 @@ class PlatformProvider:
                 model_name=model_name,
                 system_prompt=self.system_prompt,
             )
+            logger.info("Registered AI platform", platform=name)
 
     def get_platform(self, name: str) -> Optional[APIlatform]:
         return self.platforms.get(name)
@@ -65,7 +68,7 @@ def get_platform_provider():
     return provider
 
 
-def _process_request(request: ChatRequest):
+def _process_request(request: ChatRequest, memory_manager: MemoryManager, user_id: str):
     conversation_id = request.conversation_id or memory_manager.generate_conversation_id()
     history = memory_manager.get_history(conversation_id)
     if request.template and request.template_data:
@@ -74,7 +77,7 @@ def _process_request(request: ChatRequest):
             raise HTTPException(status_code=400, detail="Failed to render the provided template.")
         request.messages[-1].content = last_message_content
     for message in request.messages:
-        memory_manager.add_message(conversation_id, message)
+        memory_manager.add_message(conversation_id, message, user_id)
     full_conversation = history + request.messages
     return conversation_id, full_conversation
 
@@ -93,32 +96,54 @@ def _get_system_prompt(request: ChatRequest) -> str:
 async def root():
     return {"message": "API is Running...!!"}
 
+@app.get("/health")
+async def health_check(db: Session = Depends(get_db)):
+    # Check DB connection
+    try:
+        db.execute("SELECT 1")
+    except Exception as e:
+        logger.error("Database connection failed", error=str(e))
+        raise HTTPException(status_code=503, detail="Database connection failed.")
+
+    # Check Redis connection
+    try:
+        redis_client = redis.from_url(config.REDIS_URL)
+        redis_client.ping()
+    except Exception as e:
+        logger.error("Redis connection failed", error=str(e))
+        raise HTTPException(status_code=503, detail="Redis connection failed.")
+
+    return {"status": "ok"}
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
     user_id: str = Depends(get_user_identifier),
     provider: PlatformProvider = Depends(get_platform_provider),
+    memory_manager: MemoryManager = Depends(get_memory_manager),
 ):
     apply_rate_limit(user_id)
 
-    conversation_id, full_conversation = _process_request(request)
+    conversation_id, full_conversation = _process_request(request, memory_manager, user_id)
 
-    # Check cache first
     cached_response = cache_manager.get(full_conversation)
     if cached_response:
+        logger.info("Cache hit", conversation_id=conversation_id)
         return ChatResponse(response=cached_response, conversation_id=conversation_id)
+    logger.info("Cache miss", conversation_id=conversation_id)
 
     system_prompt = _get_system_prompt(request)
     platform_sequence = provider.get_platform_sequence(request.platform)
 
-    # Mask PII before sending to AI
     masked_conversation = mask_pii_in_messages(full_conversation)
 
     last_error = None
     for ai_platform in platform_sequence:
         try:
-            response_text = await ai_platform.chat(
+            platform_name = ai_platform.__class__.__name__
+            logger.info("Attempting AI platform", platform=platform_name)
+            response_text, token_usage = await ai_platform.chat(
                 messages=masked_conversation,
                 parameters=request.parameters,
                 system_prompt=system_prompt,
@@ -126,18 +151,21 @@ async def chat(
             )
 
             assistant_message = Message(role="assistant", content=response_text)
-            memory_manager.add_message(conversation_id, assistant_message)
+            memory_manager.add_message(conversation_id, assistant_message, user_id)
             cache_manager.set(full_conversation, response_text)
 
-            return ChatResponse(response=response_text, conversation_id=conversation_id)
+            logger.info("AI call successful", platform=platform_name, conversation_id=conversation_id)
+            return ChatResponse(response=response_text, conversation_id=conversation_id, token_usage=token_usage)
         except Exception as e:
             last_error = e
+            logger.error("AI platform failed", platform=ai_platform.__class__.__name__, error=str(e))
             continue
 
+    logger.error("All AI platforms failed", last_error=str(last_error))
     raise HTTPException(status_code=500, detail=f"All AI platforms failed. Last error: {last_error}")
 
 
-async def stream_generator(stream, conversation_id: str, original_conversation: List[Message]):
+async def stream_generator(stream, conversation_id: str, original_conversation: List[Message], memory_manager: MemoryManager, user_id: str):
     full_response = ""
     async for chunk in stream:
         full_response += chunk
@@ -145,25 +173,29 @@ async def stream_generator(stream, conversation_id: str, original_conversation: 
         yield f"data: {response_data.model_dump_json()}\n\n"
 
     assistant_message = Message(role="assistant", content=full_response)
-    memory_manager.add_message(conversation_id, assistant_message)
+    memory_manager.add_message(conversation_id, assistant_message, user_id)
     cache_manager.set(original_conversation, full_response)
+    logger.info("Streaming response completed and cached", conversation_id=conversation_id)
 
 @app.post("/chat/stream")
 async def chat_stream(
     request: ChatRequest,
     user_id: str = Depends(get_user_identifier),
     provider: PlatformProvider = Depends(get_platform_provider),
+    memory_manager: MemoryManager = Depends(get_memory_manager),
 ):
     apply_rate_limit(user_id)
 
-    conversation_id, full_conversation = _process_request(request)
+    conversation_id, full_conversation = _process_request(request, memory_manager, user_id)
 
     cached_response = cache_manager.get(full_conversation)
     if cached_response:
+        logger.info("Cache hit for streaming", conversation_id=conversation_id)
         async def single_chunk_stream():
             response_data = StreamResponse(delta=cached_response, conversation_id=conversation_id)
             yield f"data: {response_data.model_dump_json()}\n\n"
         return StreamingResponse(single_chunk_stream(), media_type="text/event-stream")
+    logger.info("Cache miss for streaming", conversation_id=conversation_id)
 
     system_prompt = _get_system_prompt(request)
     platform_sequence = provider.get_platform_sequence(request.platform)
@@ -173,17 +205,20 @@ async def chat_stream(
         last_error = None
         for ai_platform in platform_sequence:
             try:
+                platform_name = ai_platform.__class__.__name__
+                logger.info("Attempting AI platform for streaming", platform=platform_name)
                 stream = ai_platform.stream_chat(
                     messages=masked_conversation,
                     parameters=request.parameters,
                     system_prompt=system_prompt,
                     json_mode=request.json_mode,
                 )
-                return stream_generator(stream, conversation_id, full_conversation)
+                return stream_generator(stream, conversation_id, full_conversation, memory_manager, user_id)
             except Exception as e:
                 last_error = e
+                logger.error("AI platform failed for streaming", platform=ai_platform.__class__.__name__, error=str(e))
                 continue
-        print(f"All AI platforms failed for streaming. Last error: {last_error}")
+        logger.error("All AI platforms failed for streaming", last_error=str(last_error))
 
     final_stream_generator = try_platforms_stream()
 

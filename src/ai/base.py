@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, List
-from src.schema import Message, ModelParameters
+from typing import AsyncGenerator, List, Tuple
+from src.schema import Message, ModelParameters, TokenUsage
 
 class APIlatform(ABC):
     
@@ -11,9 +11,9 @@ class APIlatform(ABC):
         parameters: ModelParameters,
         system_prompt: str,
         json_mode: bool = False,
-    ) -> str:
+    ) -> Tuple[str, TokenUsage]:
         """
-        Sends a list of messages to the AI and returns the response text.
+        Sends a list of messages to the AI and returns the response text and token usage.
         """
         pass
 
@@ -32,3 +32,10 @@ class APIlatform(ABC):
         # This is a placeholder for the generator
         if False:
             yield
+
+    @abstractmethod
+    def count_tokens(self, messages: List[Message]) -> int:
+        """
+        Counts the number of tokens in a list of messages.
+        """
+        pass

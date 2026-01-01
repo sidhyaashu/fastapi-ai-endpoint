@@ -4,6 +4,11 @@ from typing import List
 
 load_dotenv()
 
+# --- Database and Cache Configuration ---
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+
 # --- AI Platform Configuration ---
 
 # The default platform to use when none is specified in the request.

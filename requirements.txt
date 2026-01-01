@@ -6,3 +6,11 @@ python-jose[cryptography]
 openai
 anthropic
 groq
+sqlalchemy
+psycopg2-binary
+alembic
+redis
+tiktoken
+presidio-analyzer
+presidio-anonymizer
+structlog
