@@ -1,5 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from functools import lru_cache
+import asyncio
+from typing import List, Optional
 
 from src import config
 from src.ai.base import APIlatform
@@ -10,7 +13,12 @@ from src.ai.groq import Groq
 from src.auth.dependencies import get_user_identifier
 from src.auth.throttling import apply_rate_limit
 from src.prompts.prompt import load_system_prompt
-from src.schema import ChatRequest, ChatResponse
+from src.prompts.persona import get_persona_prompt
+from src.prompts.template import render_template
+from src.schema import ChatRequest, ChatResponse, Message, StreamResponse
+from src.memory.manager import memory_manager
+from src.cache.manager import cache_manager
+from src.security.pii_masking import mask_pii_in_messages
 
 
 app = FastAPI(title="AI endpoint Using FastAPI")
@@ -28,11 +36,24 @@ class PlatformProvider:
                 system_prompt=self.system_prompt,
             )
 
-    def get_platform(self, name: str) -> APIlatform:
-        platform = self.platforms.get(name)
-        if not platform:
-            raise HTTPException(status_code=400, detail=f"Platform '{name}' is not available.")
-        return platform
+    def get_platform(self, name: str) -> Optional[APIlatform]:
+        return self.platforms.get(name)
+
+    def get_platform_sequence(self, requested_platform: Optional[str]) -> List[APIlatform]:
+        sequence = []
+        if requested_platform and (platform := self.get_platform(requested_platform)):
+            if platform not in sequence:
+                sequence.append(platform)
+        if (default_platform := self.get_platform(config.DEFAULT_PLATFORM)):
+            if default_platform not in sequence:
+                sequence.append(default_platform)
+        for fallback_name in config.FALLBACK_PLATFORMS:
+            if (fallback_platform := self.get_platform(fallback_name)):
+                if fallback_platform not in sequence:
+                    sequence.append(fallback_platform)
+        if not sequence:
+            raise HTTPException(status_code=503, detail="No AI platforms are available.")
+        return sequence
 
 @lru_cache(maxsize=1)
 def get_platform_provider():
@@ -42,6 +63,30 @@ def get_platform_provider():
     provider.register_platform("anthropic", Anthropic, config.ANTHROPIC_API_KEY, config.ANTHROPIC_MODEL_NAME)
     provider.register_platform("groq", Groq, config.GROQ_API_KEY, config.GROQ_MODEL_NAME)
     return provider
+
+
+def _process_request(request: ChatRequest):
+    conversation_id = request.conversation_id or memory_manager.generate_conversation_id()
+    history = memory_manager.get_history(conversation_id)
+    if request.template and request.template_data:
+        last_message_content = render_template(request.template, request.template_data)
+        if not last_message_content:
+            raise HTTPException(status_code=400, detail="Failed to render the provided template.")
+        request.messages[-1].content = last_message_content
+    for message in request.messages:
+        memory_manager.add_message(conversation_id, message)
+    full_conversation = history + request.messages
+    return conversation_id, full_conversation
+
+def _get_system_prompt(request: ChatRequest) -> str:
+    if request.system_prompt_override:
+        return request.system_prompt_override
+    if request.persona:
+        persona_prompt = get_persona_prompt(request.persona)
+        if not persona_prompt:
+            raise HTTPException(status_code=400, detail=f"Persona '{request.persona}' not found.")
+        return persona_prompt
+    return None
 
 
 @app.get("/")
@@ -56,7 +101,93 @@ async def chat(
     provider: PlatformProvider = Depends(get_platform_provider),
 ):
     apply_rate_limit(user_id)
-    platform_name = request.platform or config.DEFAULT_PLATFORM
-    ai_platform = provider.get_platform(platform_name)
-    response_text = await ai_platform.chat(request.prompt)
-    return ChatResponse(response=response_text)
+
+    conversation_id, full_conversation = _process_request(request)
+
+    # Check cache first
+    cached_response = cache_manager.get(full_conversation)
+    if cached_response:
+        return ChatResponse(response=cached_response, conversation_id=conversation_id)
+
+    system_prompt = _get_system_prompt(request)
+    platform_sequence = provider.get_platform_sequence(request.platform)
+
+    # Mask PII before sending to AI
+    masked_conversation = mask_pii_in_messages(full_conversation)
+
+    last_error = None
+    for ai_platform in platform_sequence:
+        try:
+            response_text = await ai_platform.chat(
+                messages=masked_conversation,
+                parameters=request.parameters,
+                system_prompt=system_prompt,
+                json_mode=request.json_mode,
+            )
+
+            assistant_message = Message(role="assistant", content=response_text)
+            memory_manager.add_message(conversation_id, assistant_message)
+            cache_manager.set(full_conversation, response_text)
+
+            return ChatResponse(response=response_text, conversation_id=conversation_id)
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise HTTPException(status_code=500, detail=f"All AI platforms failed. Last error: {last_error}")
+
+
+async def stream_generator(stream, conversation_id: str, original_conversation: List[Message]):
+    full_response = ""
+    async for chunk in stream:
+        full_response += chunk
+        response_data = StreamResponse(delta=chunk, conversation_id=conversation_id)
+        yield f"data: {response_data.model_dump_json()}\n\n"
+
+    assistant_message = Message(role="assistant", content=full_response)
+    memory_manager.add_message(conversation_id, assistant_message)
+    cache_manager.set(original_conversation, full_response)
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    user_id: str = Depends(get_user_identifier),
+    provider: PlatformProvider = Depends(get_platform_provider),
+):
+    apply_rate_limit(user_id)
+
+    conversation_id, full_conversation = _process_request(request)
+
+    cached_response = cache_manager.get(full_conversation)
+    if cached_response:
+        async def single_chunk_stream():
+            response_data = StreamResponse(delta=cached_response, conversation_id=conversation_id)
+            yield f"data: {response_data.model_dump_json()}\n\n"
+        return StreamingResponse(single_chunk_stream(), media_type="text/event-stream")
+
+    system_prompt = _get_system_prompt(request)
+    platform_sequence = provider.get_platform_sequence(request.platform)
+    masked_conversation = mask_pii_in_messages(full_conversation)
+
+    async def try_platforms_stream():
+        last_error = None
+        for ai_platform in platform_sequence:
+            try:
+                stream = ai_platform.stream_chat(
+                    messages=masked_conversation,
+                    parameters=request.parameters,
+                    system_prompt=system_prompt,
+                    json_mode=request.json_mode,
+                )
+                return stream_generator(stream, conversation_id, full_conversation)
+            except Exception as e:
+                last_error = e
+                continue
+        print(f"All AI platforms failed for streaming. Last error: {last_error}")
+
+    final_stream_generator = try_platforms_stream()
+
+    return StreamingResponse(
+        final_stream_generator,
+        media_type="text/event-stream"
+    )

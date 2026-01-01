@@ -1,10 +1,21 @@
 import os
 from dotenv import load_dotenv
+from typing import List
 
 load_dotenv()
 
-# AI Platforms
+# --- AI Platform Configuration ---
+
+# The default platform to use when none is specified in the request.
 DEFAULT_PLATFORM = os.getenv("DEFAULT_PLATFORM", "gemini")
+
+# A comma-separated list of platforms to try in order if the primary one fails.
+# Example: FALLBACK_PLATFORMS=openai,anthropic,gemini
+FALLBACK_PLATFORMS_STR = os.getenv("FALLBACK_PLATFORMS", "openai,gemini")
+FALLBACK_PLATFORMS: List[str] = [p.strip() for p in FALLBACK_PLATFORMS_STR.split(",") if p.strip()]
+
+
+# --- API Keys and Model Names ---
 
 # Gemini
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -23,12 +34,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL_NAME = "llama3-8b-8192"
 
 
-# Rate Limiting
+# --- Rate Limiting ---
 GLOBAL_RATE_LIMIT = 3
 GLOBAL_TIME_WINDOW_SECONDS = 60
 AUTH_RATE_LIMIT = 5
 AUTH_TIME_WINDOW_SECONDS = 60
 
-# JWT
+# --- JWT Authentication ---
 SECRET_KEY = os.getenv("SECRET_KEY", "a-string-secret-at-least-256-bits-long")
 ALGORITHM = "HS256"

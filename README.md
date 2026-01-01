@@ -1,78 +1,50 @@
-# 🚀 FastAPI Multi-Platform AI Gateway
+# 🚀 FastAPI Advanced AI Gateway
 
-A production-ready, multi-platform AI gateway powered by FastAPI. This service integrates with **Google Gemini, OpenAI, Anthropic, and Groq** to provide a unified chat endpoint with custom system prompts, authentication, and rate limiting.
+An enterprise-ready, multi-platform AI gateway powered by FastAPI. This service integrates with **Google Gemini, OpenAI, Anthropic, and Groq** and includes a rich feature set for reliability, security, and advanced prompt engineering.
 
 ---
 
 ## 📂 Project Structure
 
-```
-fastapi-ai-endpoint/
-├── README.md                  # Project documentation
-├── pyproject.toml             # Project metadata & dependencies
-├── requirements.txt           # Python dependencies
-├── .python-version            # Python version (3.11)
-└── src/
-    ├── main.py                # FastAPI entrypoint
-    ├── schema.py              # Request/Response models
-    ├── config.py              # Configuration management
-    │
-    ├── ai/                    # AI-related logic
-    │   ├── base.py            # Abstract AI platform interface
-    │   ├── gemini.py          # Gemini implementation
-    │   ├── openai.py          # OpenAI implementation
-    │   ├── anthropic.py       # Anthropic implementation
-    │   └── groq.py            # Groq implementation
-    │
-    ├── auth/                  # Authentication & Rate limiting
-    │   ├── dependencies.py    # JWT-based auth handler
-    │   └── throttling.py      # Request rate limiting logic
-    │
-    ├── prompts/               # Prompt management
-    │   ├── prompt.py          # Loader for system prompts
-    │   └── system_prompts.md  # Default system instructions
-    │
-    └── __init__.py (optional if needed)
-```
+The project is organized into modules for AI, authentication, caching, memory, prompts, and security, ensuring a clean and maintainable codebase.
 
 ---
 
-## ⚡ Features
+## ⚡ Core Features
 
-* ✅ **Unified Chat Endpoint** supporting **Google Gemini, OpenAI, Anthropic, and Groq**
-* ✅ **System prompt customization** via `system_prompts.md`
-* ✅ **JWT authentication** (optional)
-* ✅ **Rate limiting** (different for authenticated vs unauthenticated users)
-* ✅ **Swagger UI** for testing
+*   ✅ **Multi-Platform Support**: Unified API for Google Gemini, OpenAI, Anthropic, and Groq.
+*   ✅ **Streaming Responses**: Real-time, token-by-token streaming via a `/chat/stream` endpoint.
+*   ✅ **Conversation Memory**: Maintains conversation history using a unique `conversation_id`.
+*   ✅ **Smart Fallback**: Automatically retries requests with other platforms if a provider fails.
+
+## ✨ Advanced Features
+
+*   ✅ **Semantic Caching**: Reduces latency and cost by caching identical requests.
+*   ✅ **PII Masking**: Automatically redacts sensitive information (e.g., emails) before sending to AI providers.
+*   ✅ **Dynamic Prompt Templates**: Inject variables into your prompts for dynamic content generation.
+*   ✅ **Persona Library**: Switch between pre-defined system prompts (personas) on the fly.
+*   ✅ **System Prompt Override**: Customize the system prompt for a single request.
+*   ✅ **JSON Mode**: Enforce structured JSON output from compatible models.
+*   ✅ **Hyperparameter Control**: Adjust `temperature` and `max_tokens` for fine-tuned responses.
 
 ---
 
 ## 🛠️ Setup
 
-### 1️⃣ Clone the Repository
+### 1️⃣ Clone the Repository & Install Dependencies
 
 ```bash
 git clone https://github.com/sidhyaashu/fastapi-ai-endpoint.git
 cd fastapi-ai-endpoint
-```
-
-### 2️⃣ Create Virtual Environment (Python 3.11)
-
-```bash
-python3.11 -m venv venv
-source venv/bin/activate   # Linux/Mac
-venv\Scripts\activate      # Windows
-```
-
-### 3️⃣ Install Dependencies
-
-```bash
+# Create a virtual environment (Python 3.11)
+python3.11 -m venv venv && source venv/bin/activate
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 4️⃣ Configure Environment Variables
+### 2️⃣ Configure Environment Variables
 
-Create a `.env` file in the project root. Add the API keys for the platforms you want to use.
+Create a `.env` file in the project root. Add API keys for the platforms you want to use and configure the application settings.
 
 ```ini
 # --- AI Platforms (at least one is required) ---
@@ -81,11 +53,14 @@ OPENAI_API_KEY=your_openai_api_key_here
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
 GROQ_API_KEY=your_groq_api_key_here
 
-# --- Application Settings (optional) ---
-# Set the default AI platform to use if not specified in the request
+# --- Application Settings ---
+# The default platform to use if not specified in the request.
 DEFAULT_PLATFORM=gemini
 
-# Secret key for JWT authentication
+# A comma-separated list of platforms to use as fallbacks, in order.
+FALLBACK_PLATFORMS=openai,anthropic
+
+# Secret key for JWT authentication.
 SECRET_KEY=a-super-secret-key-at-least-256-bits-long
 ```
 
@@ -97,122 +72,57 @@ SECRET_KEY=a-super-secret-key-at-least-256-bits-long
 uvicorn src.main:app --reload
 ```
 
-* API runs at: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
-* Interactive API Docs (Swagger UI): **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)**
+*   **API URL**: `http://127.0.0.1:8000`
+*   **Swagger UI (Interactive Docs)**: `http://127.0.0.1:8000/docs`
 
 ---
 
-## 📌 Endpoints
+## 📌 API Endpoints & Usage
 
-### **1. Root Check**
+### **1. Standard Chat: `/chat`**
 
-```http
-GET /
-```
+This endpoint sends a request and waits for the full response to be generated.
 
-Response:
-
-```json
-{"message": "API is Running...!!"}
-```
-
----
-
-### **2. Chat Endpoint**
-
-```http
-POST /chat
-Content-Type: application/json
-Authorization: Bearer <your_jwt_token>   # Optional
-```
-
-#### Request:
-
-The `platform` field is optional. If omitted, the `DEFAULT_PLATFORM` from your `.env` file will be used.
+#### Full Request Example:
 
 ```json
 {
-  "prompt": "Hello, how are you?",
-  "platform": "openai"
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is the capital of {country}?"
+    }
+  ],
+  "platform": "openai",
+  "conversation_id": "conv-12345",
+  "system_prompt_override": "You are a helpful geography expert.",
+  "persona": "helpful_programmer",
+  "parameters": {
+    "temperature": 0.7,
+    "max_tokens": 100
+  },
+  "json_mode": false,
+  "template": "What is the capital of {country}?",
+  "template_data": {
+    "country": "France"
+  }
 }
 ```
 
-#### Response:
+### **2. Streaming Chat: `/chat/stream`**
 
-```json
-{
-  "response": "Hi there! I'm doing great 😃 How about you?"
-}
-```
+This endpoint streams the response token by token as Server-Sent Events (SSE).
 
----
+#### Example `curl` for Streaming:
 
-## 🔐 Authentication & Rate Limiting
-
-* **Without token** → treated as `global_unauthenticated_user`
-
-  * Limit: **3 requests / 60 sec**
-* **With valid JWT token**
-
-  * Limit: **5 requests / 60 sec**
-* If exceeded:
-
-```json
-{
-  "detail": "Too many requests. Please try again later."
-}
-```
-
----
-
-## 🧠 AI Platforms
-
-The service supports multiple AI models. The default models are:
-
-*   **Gemini**: `gemini-1.5-flash`
-*   **OpenAI**: `gpt-4`
-*   **Anthropic**: `claude-3-opus-20240229`
-*   **Groq**: `llama3-8b-8192`
-
-* **System Prompt** (`src/prompts/system_prompts.md`):
-
-```
-Answer the user in plaintext (no markdown), but use emojis! Be simple, clear and concise
-```
-
-This ensures **emoji-friendly**, **plain text**, **concise responses** across all platforms.
-
----
-
-## 🧪 Testing
-
-### Using `curl`
-
-To use the default platform:
 ```bash
-curl -X POST http://127.0.0.1:8000/chat \
+curl -N -X POST http://127.0.0.1:8000/chat/stream \
 -H "Content-Type: application/json" \
--d '{"prompt": "Tell me a joke"}'
+-d '{
+  "messages": [{"role": "user", "content": "Write a short story about a robot."}],
+  "platform": "groq"
+}'
 ```
-
-To specify a platform (e.g., `groq`):
-```bash
-curl -X POST http://127.0.0.1:8000/chat \
--H "Content-Type: application/json" \
--d '{"prompt": "Tell me a joke", "platform": "groq"}'
-```
-
-### Using Swagger UI
-
-Visit **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)** and test interactively.
-
----
-
-## 📖 Future Improvements
-
-* Add **JWT token generation endpoint**
-* Add **logging & monitoring**
-* Add **Docker support** for deployment
 
 ---
 
