@@ -1,5 +1,5 @@
 import time
-from src.constant import GLOBAL_RATE_LIMIT, GLOBAL_TIME_WINDOW_SECOND, AUTH_RATE_LIMIT, AUTH_TIME_WINDOW_SECONDS
+from src import config
 from fastapi import HTTPException, status
 from collections import defaultdict
 
@@ -10,11 +10,11 @@ def apply_rate_limit(user_id: str):
     current_time = time.time()
     
     if user_id== "global_unauthenticated_user":
-        rate_limit = GLOBAL_RATE_LIMIT
-        time_window = GLOBAL_TIME_WINDOW_SECOND
+        rate_limit = config.GLOBAL_RATE_LIMIT
+        time_window = config.GLOBAL_TIME_WINDOW_SECONDS
     else:
-        rate_limit = AUTH_RATE_LIMIT
-        time_window = AUTH_TIME_WINDOW_SECONDS
+        rate_limit = config.AUTH_RATE_LIMIT
+        time_window = config.AUTH_TIME_WINDOW_SECONDS
     
     user_requests[user_id] = [
         t for t in user_requests[user_id] if t> current_time - time_window
