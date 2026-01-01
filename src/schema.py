@@ -13,6 +13,12 @@ class ModelParameters(BaseModel):
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Controls randomness. Lower is more deterministic.")
     max_tokens: Optional[int] = Field(None, gt=0, description="The maximum number of tokens to generate.")
 
+class TokenUsage(BaseModel):
+    """Represents the number of tokens used in a request."""
+    prompt_tokens: int = Field(..., description="The number of tokens in the prompt.")
+    completion_tokens: int = Field(..., description="The number of tokens in the generated response.")
+    total_tokens: int = Field(..., description="The total number of tokens used.")
+
 # --- Request Models ---
 
 class ChatRequest(BaseModel):
@@ -39,6 +45,7 @@ class ChatResponse(BaseModel):
     """The main response model for the /chat endpoint."""
     response: str = Field(..., description="The AI's generated response text.")
     conversation_id: Optional[str] = Field(None, description="The unique identifier for the conversation session.")
+    token_usage: Optional[TokenUsage] = Field(None, description="The token usage for the request.")
 
 class StreamResponse(BaseModel):
     """The response model for the /chat/stream endpoint."""
