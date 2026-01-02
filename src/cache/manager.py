@@ -1,37 +1,65 @@
 from typing import List, Optional
-import redis
-import hashlib
-from src import config
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from pgvector.sqlalchemy import Vector
+from src.database.models import SemanticCache
 from src.schema import Message
+from src.utils.embedding import get_embedding
+from fastapi import Depends
+from src.database.session import get_db
 
 class CacheManager:
-    """A Redis-based cache for chat responses with a TTL."""
+    """A database-backed semantic cache for chat responses."""
 
-    def __init__(self, redis_url: str, ttl: int = 3600):
+    def __init__(self, db: AsyncSession, similarity_threshold: float = 0.9):
+        self.db = db
+        self.similarity_threshold = similarity_threshold
+
+    async def get(self, messages: List[Message]) -> Optional[str]:
         """
-        Initializes the CacheManager with a Redis connection.
-        Args:
-            redis_url (str): The connection URL for the Redis server.
-            ttl (int): The default time-to-live for cache entries in seconds.
+        Retrieves a cached response by finding a semantically similar prompt.
         """
-        self.client = redis.from_url(redis_url)
-        self.ttl = ttl
+        last_user_message = next((msg.content for msg in reversed(messages) if msg.role == 'user'), None)
+        if not last_user_message:
+            return None
 
-    def _generate_key(self, messages: List[Message]) -> str:
-        """Generates a SHA-256 hash key from a list of messages for consistent key format."""
-        content = "".join([f"{m.role}:{m.content}" for m in messages])
-        return hashlib.sha256(content.encode('utf-8')).hexdigest()
+        embedding = get_embedding(last_user_message)
 
-    def get(self, messages: List[Message]) -> Optional[str]:
-        """Retrieves a cached response from Redis."""
-        key = self._generate_key(messages)
-        cached_response = self.client.get(key)
-        return cached_response.decode('utf-8') if cached_response else None
+        # Find the closest matching embedding in the database
+        result = await self.db.execute(
+            select(SemanticCache)
+            .order_by(SemanticCache.embedding.l2_distance(embedding))
+            .limit(1)
+        )
+        closest_match = result.scalars().first()
 
-    def set(self, messages: List[Message], response: str):
-        """Stores a response in the Redis cache with a TTL."""
-        key = self._generate_key(messages)
-        self.client.set(key, response, ex=self.ttl)
+        if closest_match:
+            # Check if the similarity is within the threshold
+            distance = await self.db.execute(
+                select(SemanticCache.embedding.l2_distance(embedding))
+                .where(SemanticCache.id == closest_match.id)
+            )
+            if distance.scalar_one() < (1 - self.similarity_threshold):
+                return closest_match.response
 
-# A global instance of the cache manager, configured from src.config
-cache_manager = CacheManager(redis_url=config.REDIS_URL)
+        return None
+
+    async def set(self, messages: List[Message], response: str):
+        """Stores a prompt-response pair and its embedding in the cache."""
+        last_user_message = next((msg.content for msg in reversed(messages) if msg.role == 'user'), None)
+        if not last_user_message:
+            return
+
+        embedding = get_embedding(last_user_message)
+
+        cache_entry = SemanticCache(
+            prompt=last_user_message,
+            response=response,
+            embedding=embedding
+        )
+        self.db.add(cache_entry)
+        await self.db.commit()
+
+async def get_cache_manager(db: AsyncSession = Depends(get_db)):
+    """FastAPI dependency to get a cache manager instance."""
+    return CacheManager(db)

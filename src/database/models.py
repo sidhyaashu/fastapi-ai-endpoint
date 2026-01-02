@@ -2,6 +2,7 @@ import uuid
 from sqlalchemy import Column, String, DateTime, ForeignKey, Text, LargeBinary, Integer, Float
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 from src.utils.crypto import encrypt_key, decrypt_key
 
 Base = declarative_base()
@@ -71,3 +72,11 @@ class UsageLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="usage_logs")
+
+class SemanticCache(Base):
+    __tablename__ = "semantic_cache"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    prompt = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    embedding = Column(Vector(384), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

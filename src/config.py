@@ -5,7 +5,8 @@ from typing import List
 load_dotenv()
 
 # --- Database and Cache Configuration ---
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
+ASYNC_DATABASE_URL = os.getenv("ASYNC_DATABASE_URL", "postgresql+asyncpg://user:password@localhost:5432/mydatabase")
+SYNC_DATABASE_URL = os.getenv("SYNC_DATABASE_URL", "postgresql://user:password@localhost:5432/mydatabase")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 
@@ -48,3 +49,6 @@ AUTH_TIME_WINDOW_SECONDS = 60
 # --- JWT Authentication ---
 SECRET_KEY = os.getenv("SECRET_KEY", "a-string-secret-at-least-256-bits-long")
 ALGORITHM = "HS256"
+
+# --- Security and Guardrails ---
+GUARDRAIL_BLOCK_THRESHOLD = float(os.getenv("GUARDRAIL_BLOCK_THRESHOLD", 0.85))

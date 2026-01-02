@@ -3,24 +3,16 @@ import redis
 from src import config
 from fastapi import Depends, HTTPException, status
 from functools import lru_cache
-from sqlalchemy.orm import Session
 from src.utils.logger import logger
-from src.database.session import get_db
 from src.database.models import User
-from src.auth.dependencies import get_user_identifier
+from src.auth.dependencies import get_current_user
 
 @lru_cache(maxsize=1)
 def get_redis_client():
     """Returns a Redis client instance, cached for efficiency."""
     return redis.from_url(config.REDIS_URL)
 
-def get_current_user(user_id: str = Depends(get_user_identifier), db: Session = Depends(get_db)) -> User | None:
-    """FastAPI dependency to get the current user from the database."""
-    if user_id == "global_unauthenticated_user":
-        return None
-    return db.query(User).filter(User.id == user_id).first()
-
-def apply_rate_limit(user: User | None = Depends(get_current_user)):
+async def apply_rate_limit(user: User | None = Depends(get_current_user)):
     """
     Applies a rate limit to a user, tracked in Redis.
     This function uses the fixed-window counter algorithm.

@@ -1,15 +1,17 @@
 from typing import Optional
 from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import APIKeyHeader
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
 from src.database.session import get_db
 from src.database.models import APIKey, User
 
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
-def get_user_identifier(
+async def get_user_identifier(
     api_key: Optional[str] = Security(api_key_header),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ) -> str:
     if not api_key:
         return "global_unauthenticated_user"
@@ -17,12 +19,12 @@ def get_user_identifier(
     # The key is expected to be "Bearer <key>"
     parts = api_key.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        return "global_unauthenticated_user" # or raise an exception for malformed header
+        return "global_unauthenticated_user"
 
     token = parts[1]
 
-    # Check the database for the API key
-    db_api_key = db.query(APIKey).filter(APIKey.key == token).first()
+    result = await db.execute(select(APIKey).where(APIKey.key == token))
+    db_api_key = result.scalars().first()
 
     if not db_api_key:
         raise HTTPException(
@@ -30,5 +32,12 @@ def get_user_identifier(
             detail="Invalid API Key",
         )
 
-    # Return the user_id associated with the key
     return db_api_key.user_id
+
+async def get_current_user(
+    user_id: str = Depends(get_user_identifier),
+    db: AsyncSession = Depends(get_db)
+) -> User | None:
+    if user_id == "global_unauthenticated_user":
+        return None
+    return await db.get(User, user_id)
