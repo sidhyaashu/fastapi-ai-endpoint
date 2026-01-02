@@ -13,7 +13,7 @@ from src import config as app_config
 config = context.config
 
 # Set the DATABASE_URL in the config
-config.set_main_option('DATABASE_URL', app_config.DATABASE_URL)
+config.set_main_option('sqlalchemy.url', app_config.SYNC_DATABASE_URL)
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:

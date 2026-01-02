@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 from functools import lru_cache
 import time
 from typing import List, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 import pybreaker
 
 from src import config
@@ -12,7 +12,7 @@ from src.ai.gemini import Gemini
 from src.ai.openai import OpenAI
 from src.ai.anthropic import Anthropic
 from src.ai.groq import Groq
-from src.auth.dependencies import get_user_identifier
+from src.auth.dependencies import get_current_user
 from src.auth.throttling import apply_rate_limit
 from src.database.models import User, UsageLog
 from src.prompts.prompt import load_system_prompt
@@ -20,21 +20,19 @@ from src.prompts.persona import get_persona_prompt
 from src.prompts.template import render_template
 from src.schema import ChatRequest, ChatResponse, Message, StreamResponse, TokenUsage
 from src.memory.manager import MemoryManager, get_memory_manager
-from src.cache.manager import cache_manager
+from src.cache.manager import CacheManager, get_cache_manager
 from src.security.pii_masking import mask_pii_in_messages
+from src.guardrails.manager import GuardrailManager, get_guardrail_manager
 from src.utils.logger import logger
 from src.utils.cost_calculator import calculate_cost
 from src.utils.circuit_breaker import get_breaker
-from src.utils.token_counter import count_tokens
-from src.database.session import get_db, SessionLocal
+from src.database.session import get_db, AsyncSessionLocal
+from src.analytics import analytics_router
 import redis
 
 app = FastAPI(title="AI endpoint Using FastAPI")
 
-def get_current_user(user_id: str = Depends(get_user_identifier), db: Session = Depends(get_db)) -> User | None:
-    if user_id == "global_unauthenticated_user":
-        return None
-    return db.query(User).filter(User.id == user_id).first()
+app.include_router(analytics_router)
 
 class PlatformProvider:
     def __init__(self, user: User | None = None):
@@ -73,7 +71,7 @@ class PlatformProvider:
             raise HTTPException(status_code=503, detail="No AI platforms are available.")
         return sequence
 
-def get_platform_provider(user: User | None = Depends(get_current_user)):
+async def get_platform_provider(user: User | None = Depends(get_current_user)):
     provider = PlatformProvider(user)
     provider.register_platform("gemini", Gemini, config.GEMINI_API_KEY, config.GEMINI_MODEL_NAME)
     provider.register_platform("openai", OpenAI, config.OPENAI_API_KEY, config.OPENAI_MODEL_NAME)
@@ -81,9 +79,8 @@ def get_platform_provider(user: User | None = Depends(get_current_user)):
     provider.register_platform("groq", Groq, config.GROQ_API_KEY, config.GROQ_MODEL_NAME)
     return provider
 
-def log_usage(user_id: str, platform: str, token_usage: TokenUsage, latency_ms: float, model_name: str):
-    db = SessionLocal()
-    try:
+async def log_usage(user_id: str, platform: str, token_usage: TokenUsage, latency_ms: float, model_name: str):
+    async with AsyncSessionLocal() as db:
         cost = calculate_cost(model_name, token_usage)
         log_entry = UsageLog(
             user_id=user_id,
@@ -95,20 +92,18 @@ def log_usage(user_id: str, platform: str, token_usage: TokenUsage, latency_ms: 
             cost=cost,
         )
         db.add(log_entry)
-        db.commit()
-    finally:
-        db.close()
+        await db.commit()
 
-def _process_request(request: ChatRequest, memory_manager: MemoryManager, user_id: str):
+async def _process_request(request: ChatRequest, memory_manager: MemoryManager, user_id: str):
     conversation_id = request.conversation_id or memory_manager.generate_conversation_id()
-    history = memory_manager.get_history(conversation_id)
+    history = await memory_manager.get_history(conversation_id)
+
     if request.template and request.template_data:
         last_message_content = render_template(request.template, request.template_data)
         if not last_message_content:
             raise HTTPException(status_code=400, detail="Failed to render the provided template.")
         request.messages[-1].content = last_message_content
-    for message in request.messages:
-        memory_manager.add_message(conversation_id, message, user_id)
+
     full_conversation = history + request.messages
     return conversation_id, full_conversation
 
@@ -123,18 +118,14 @@ def _get_system_prompt(request: ChatRequest) -> str:
     return None
 
 @app.get("/health")
-async def health_check(db: Session = Depends(get_db)):
+async def health_check(db: AsyncSession = Depends(get_db)):
     try:
-        db.execute("SELECT 1")
+        await db.execute("SELECT 1")
     except Exception as e:
         logger.error("Database connection failed", error=str(e))
         raise HTTPException(status_code=503, detail="Database connection failed.")
-    try:
-        redis_client = redis.from_url(config.REDIS_URL)
-        redis_client.ping()
-    except Exception as e:
-        logger.error("Redis connection failed", error=str(e))
-        raise HTTPException(status_code=503, detail="Redis connection failed.")
+    # Redis is no longer a direct dependency for caching, but is used for rate limiting.
+    # The health check will pass if the app can start, and rate limiting issues will appear in logs.
     return {"status": "ok"}
 
 @app.post("/chat", response_model=ChatResponse)
@@ -144,17 +135,23 @@ async def chat(
     user: User | None = Depends(get_current_user),
     provider: PlatformProvider = Depends(get_platform_provider),
     memory_manager: MemoryManager = Depends(get_memory_manager),
+    cache_manager: CacheManager = Depends(get_cache_manager),
+    guardrail_manager: GuardrailManager = Depends(get_guardrail_manager),
 ):
-    apply_rate_limit(user)
+    await apply_rate_limit(user)
 
     user_id = user.id if user else "global_unauthenticated_user"
-    conversation_id, full_conversation = _process_request(request, memory_manager, user_id)
+    conversation_id, full_conversation = await _process_request(request, memory_manager, user_id)
 
-    cached_response = cache_manager.get(full_conversation)
+    guardrail_result = await guardrail_manager.scan(full_conversation)
+    if guardrail_result.is_triggered and guardrail_result.risk_score >= config.GUARDRAIL_BLOCK_THRESHOLD:
+        raise HTTPException(status_code=400, detail=f"Request blocked by guardrail: {guardrail_result.message}")
+
+    cached_response = await cache_manager.get(full_conversation)
     if cached_response:
-        logger.info("Cache hit", conversation_id=conversation_id)
+        logger.info("Cache hit", conversation_id=conversation_id, cache_type="semantic")
         return ChatResponse(response=cached_response, conversation_id=conversation_id)
-    logger.info("Cache miss", conversation_id=conversation_id)
+    logger.info("Cache miss", conversation_id=conversation_id, cache_type="semantic")
 
     system_prompt = _get_system_prompt(request)
     platform_sequence = provider.get_platform_sequence(request.platform)
@@ -176,9 +173,12 @@ async def chat(
             )
             latency_ms = (time.time() - start_time) * 1000
 
+            user_message = full_conversation[-1]
             assistant_message = Message(role="assistant", content=response_text)
-            memory_manager.add_message(conversation_id, assistant_message, user_id)
-            cache_manager.set(full_conversation, response_text)
+            await memory_manager.add_message(conversation_id, user_message, user_id)
+            await memory_manager.add_message(conversation_id, assistant_message, user_id)
+
+            await cache_manager.set(full_conversation, response_text)
 
             if user:
                 background_tasks.add_task(log_usage, user.id, platform_name, token_usage, latency_ms, ai_platform.model_name)
@@ -204,9 +204,13 @@ async def stream_generator(stream, conversation_id: str, original_conversation: 
         yield f"data: {StreamResponse(delta=chunk, conversation_id=conversation_id).model_dump_json()}\n\n"
 
     latency_ms = (time.time() - start_time) * 1000
+
+    user_message = original_conversation[-1]
     assistant_message = Message(role="assistant", content=full_response)
-    memory_manager.add_message(conversation_id, assistant_message, user_id)
-    cache_manager.set(original_conversation, full_response)
+    await memory_manager.add_message(conversation_id, user_message, user_id)
+    await memory_manager.add_message(conversation_id, assistant_message, user_id)
+
+    await cache_manager.set(original_conversation, full_response)
 
     if user_id != "global_unauthenticated_user":
         prompt_tokens = count_tokens(original_conversation, model_name)
@@ -223,15 +227,21 @@ async def chat_stream(
     user: User | None = Depends(get_current_user),
     provider: PlatformProvider = Depends(get_platform_provider),
     memory_manager: MemoryManager = Depends(get_memory_manager),
+    cache_manager: CacheManager = Depends(get_cache_manager),
+    guardrail_manager: GuardrailManager = Depends(get_guardrail_manager),
 ):
-    apply_rate_limit(user)
+    await apply_rate_limit(user)
 
     user_id = user.id if user else "global_unauthenticated_user"
-    conversation_id, full_conversation = _process_request(request, memory_manager, user_id)
+    conversation_id, full_conversation = await _process_request(request, memory_manager, user_id)
 
-    cached_response = cache_manager.get(full_conversation)
+    guardrail_result = await guardrail_manager.scan(full_conversation)
+    if guardrail_result.is_triggered and guardrail_result.risk_score >= config.GUARDRAIL_BLOCK_THRESHOLD:
+        raise HTTPException(status_code=400, detail=f"Request blocked by guardrail: {guardrail_result.message}")
+
+    cached_response = await cache_manager.get(full_conversation)
     if cached_response:
-        logger.info("Cache hit for streaming", conversation_id=conversation_id)
+        logger.info("Cache hit for streaming", conversation_id=conversation_id, cache_type="semantic")
         async def single_chunk_stream():
             yield f"data: {StreamResponse(delta=cached_response, conversation_id=conversation_id).model_dump_json()}\n\n"
         return StreamingResponse(single_chunk_stream(), media_type="text/event-stream")

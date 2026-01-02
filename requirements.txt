@@ -16,3 +16,6 @@ presidio-anonymizer
 structlog
 cryptography
 pybreaker
+asyncpg
+pgvector
+sentence-transformers
