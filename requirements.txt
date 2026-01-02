@@ -14,3 +14,5 @@ tiktoken
 presidio-analyzer
 presidio-anonymizer
 structlog
+cryptography
+pybreaker

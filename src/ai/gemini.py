@@ -4,7 +4,6 @@ from google.generativeai.types import GenerationConfig
 
 from src.ai.base import APIlatform
 from src.schema import Message, ModelParameters, TokenUsage
-from src.utils.token_counter import count_tokens as tiktoken_count
 
 class Gemini(APIlatform):
     def __init__(self, api_key: str, model_name: str, system_prompt: str = None):
@@ -34,14 +33,10 @@ class Gemini(APIlatform):
             generation_config=generation_config,
         )
 
-        prompt_tokens = self.count_tokens(messages)
-        completion_tokens = self.count_tokens([Message(role="assistant", content=response.text)])
-        total_tokens = prompt_tokens + completion_tokens
-
         token_usage = TokenUsage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+            prompt_tokens=response.usage_metadata.prompt_token_count,
+            completion_tokens=response.usage_metadata.candidates_token_count,
+            total_tokens=response.usage_metadata.total_token_count,
         )
 
         return response.text, token_usage
@@ -88,6 +83,7 @@ class Gemini(APIlatform):
         return GenerationConfig(**config_dict)
 
     def count_tokens(self, messages: List[Message]) -> int:
-        # Gemini's token counting is not as straightforward as OpenAI's.
-        # We'll use tiktoken as a general approximation.
-        return tiktoken_count(messages)
+        # This method is now only used for estimations in streaming,
+        # but the chat endpoint uses the exact values from the API response.
+        gemini_messages = [{"role": m.role, "parts": [m.content]} for m in messages]
+        return self.model.count_tokens(gemini_messages).total_tokens
