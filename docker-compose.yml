@@ -1,6 +1,25 @@
 version: '3.8'
 
 services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/mydatabase
+      - REDIS_URL=redis://redis:6379
+      # Pass through other environment variables from a .env file
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - DEFAULT_PLATFORM=${DEFAULT_PLATFORM}
+      - FALLBACK_PLATFORMS=${FALLBACK_PLATFORMS}
+      - SECRET_KEY=${SECRET_KEY}
+
   postgres:
     image: postgres:13
     environment:

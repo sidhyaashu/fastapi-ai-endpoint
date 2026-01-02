@@ -6,7 +6,7 @@ An enterprise-ready, multi-platform AI gateway powered by FastAPI. This service 
 
 ## 📂 Project Structure
 
-The project is organized into modules for AI, authentication, caching, memory, prompts, and security, ensuring a clean and maintainable codebase.
+The project is organized into modules for AI, authentication, caching, memory, prompts, security, and utils, ensuring a clean and maintainable codebase.
 
 ---
 
@@ -15,19 +15,20 @@ The project is organized into modules for AI, authentication, caching, memory, p
 *   ✅ **Multi-Platform Support**: Unified API for Google Gemini, OpenAI, Anthropic, and Groq.
 *   ✅ **Streaming Responses**: Real-time, token-by-token streaming via a `/chat/stream` endpoint.
 *   ✅ **Persistent Conversation Memory**: Maintains conversation history in a PostgreSQL database.
-*   ✅ **Smart Fallback**: Automatically retries requests with other platforms if a provider fails.
+*   ✅ **Smart Fallback & Circuit Breaker**: Automatically retries requests with other platforms and temporarily disables failing providers.
 
 ## ✨ Advanced Features
 
+*   ✅ **Multi-Tenancy**: Supports different user tiers with varying rate limits.
+*   ✅ **Bring Your Own Key (BYOK)**: Allows users to provide their own encrypted API keys.
+*   ✅ **Observability & Billing Foundation**: Logs usage data (tokens, latency, cost) to a PostgreSQL database.
 *   ✅ **Redis Caching**: Reduces latency and cost by caching identical requests in Redis with a TTL.
 *   ✅ **Scalable Rate Limiting**: Enforces rate limits across multiple instances using Redis.
 *   ✅ **Robust PII Masking**: Automatically redacts a wide range of sensitive information using Microsoft Presidio.
 *   ✅ **Token Counting**: Tracks and returns token usage for each request, essential for billing and analytics.
 *   ✅ **Dynamic Prompt Templates**: Inject variables into your prompts for dynamic content generation.
 *   ✅ **Persona Library**: Switch between pre-defined system prompts (personas) on the fly.
-*   ✅ **System Prompt Override**: Customize the system prompt for a single request.
-*   ✅ **JSON Mode**: Enforce structured JSON output from compatible models.
-*   ✅ **Hyperparameter Control**: Adjust `temperature` and `max_tokens` for fine-tuned responses.
+*   ✅ **Containerized Deployment**: Includes a `Dockerfile` and `docker-compose.yml` for a one-command setup.
 
 ---
 
@@ -35,7 +36,7 @@ The project is organized into modules for AI, authentication, caching, memory, p
 
 ### 1️⃣ Prerequisites
 
-*   **Docker** and **Docker Compose**: For running PostgreSQL and Redis.
+*   **Docker** and **Docker Compose**
 *   **Python 3.11**
 
 ### 2️⃣ Clone the Repository & Install Dependencies
@@ -55,9 +56,7 @@ Create a `.env` file in the project root:
 
 ```ini
 # --- Infrastructure ---
-# Connection string for your PostgreSQL database
 DATABASE_URL=postgresql://user:password@localhost:5432/mydatabase
-# Connection string for your Redis instance
 REDIS_URL=redis://localhost:6379
 
 # --- AI Platforms (at least one is required) ---
@@ -90,38 +89,11 @@ SECRET_KEY=a-super-secret-key-at-least-256-bits-long
 
 ## 📌 API Endpoints & Usage
 
-### **1. Standard Chat: `/chat`**
-
-Returns a full response, including token usage.
-
-#### Full Request Example:
-
-```json
-{
-  "messages": [{"role": "user", "content": "What is the capital of France?"}],
-  "platform": "openai",
-  "conversation_id": "conv-12345",
-  "parameters": {"temperature": 0.7}
-}
+The API is now fully containerized. You can also run the application with:
+```bash
+docker-compose up --build
 ```
-
-#### Response:
-
-```json
-{
-  "response": "The capital of France is Paris.",
-  "conversation_id": "conv-12345",
-  "token_usage": {
-    "prompt_tokens": 15,
-    "completion_tokens": 7,
-    "total_tokens": 22
-  }
-}
-```
-
-### **2. Streaming Chat: `/chat/stream`**
-
-Streams the response token by token as Server-Sent Events (SSE).
+This will build the FastAPI application image, start the PostgreSQL and Redis containers, and run the application.
 
 ---
 
