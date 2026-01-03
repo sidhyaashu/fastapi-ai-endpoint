@@ -1,5 +1,5 @@
 import time
-import redis
+import redis.asyncio as redis
 from src import config
 from fastapi import Depends, HTTPException, status
 from functools import lru_cache
@@ -9,7 +9,7 @@ from src.auth.dependencies import get_current_user
 
 @lru_cache(maxsize=1)
 def get_redis_client():
-    """Returns a Redis client instance, cached for efficiency."""
+    """Returns an async Redis client instance, cached for efficiency."""
     return redis.from_url(config.REDIS_URL)
 
 async def apply_rate_limit(user: User | None = Depends(get_current_user)):
@@ -41,10 +41,11 @@ async def apply_rate_limit(user: User | None = Depends(get_current_user)):
     key = f"rate_limit:{user_id}:{current_window}"
     
     try:
-        with redis_client.pipeline() as pipe:
+        async with redis_client.pipeline(transaction=True) as pipe:
             pipe.incr(key)
             pipe.expire(key, time_window)
-            request_count = pipe.execute()[0]
+            result = await pipe.execute()
+            request_count = result[0]
     except redis.exceptions.ConnectionError as e:
         logger.error("Redis connection error during rate limiting", error=str(e))
         return

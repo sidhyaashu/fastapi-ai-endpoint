@@ -52,3 +52,8 @@ ALGORITHM = "HS256"
 
 # --- Security and Guardrails ---
 GUARDRAIL_BLOCK_THRESHOLD = float(os.getenv("GUARDRAIL_BLOCK_THRESHOLD", 0.85))
+
+# --- Tier-based Validation Limits ---
+MAX_TOKENS_FREE_TIER = 1024
+MAX_TOKENS_PRO_TIER = 4096
+MAX_TOKENS_ENTERPRISE_TIER = 8192

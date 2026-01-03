@@ -12,7 +12,7 @@ from src.ai.gemini import Gemini
 from src.ai.openai import OpenAI
 from src.ai.anthropic import Anthropic
 from src.ai.groq import Groq
-from src.auth.dependencies import get_current_user
+from src.auth.dependencies import get_current_user, require_scope, enforce_budget
 from src.auth.throttling import apply_rate_limit
 from src.database.models import User, UsageLog
 from src.prompts.prompt import load_system_prompt
@@ -24,11 +24,13 @@ from src.cache.manager import CacheManager, get_cache_manager
 from src.security.pii_masking import mask_pii_in_messages
 from src.guardrails.manager import GuardrailManager, get_guardrail_manager
 from src.utils.logger import logger
-from src.utils.cost_calculator import calculate_cost
+from src.utils.cost_calculator import calculate_cost, count_tokens
 from src.utils.circuit_breaker import get_breaker
 from src.database.session import get_db, AsyncSessionLocal
 from src.analytics import analytics_router
-import redis
+from src.tasks import log_usage_task
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+import redis.asyncio as redis
 
 app = FastAPI(title="AI endpoint Using FastAPI")
 
@@ -79,21 +81,6 @@ async def get_platform_provider(user: User | None = Depends(get_current_user)):
     provider.register_platform("groq", Groq, config.GROQ_API_KEY, config.GROQ_MODEL_NAME)
     return provider
 
-async def log_usage(user_id: str, platform: str, token_usage: TokenUsage, latency_ms: float, model_name: str):
-    async with AsyncSessionLocal() as db:
-        cost = calculate_cost(model_name, token_usage)
-        log_entry = UsageLog(
-            user_id=user_id,
-            platform=platform,
-            prompt_tokens=token_usage.prompt_tokens,
-            completion_tokens=token_usage.completion_tokens,
-            total_tokens=token_usage.total_tokens,
-            latency_ms=latency_ms,
-            cost=cost,
-        )
-        db.add(log_entry)
-        await db.commit()
-
 async def _process_request(request: ChatRequest, memory_manager: MemoryManager, user_id: str):
     conversation_id = request.conversation_id or memory_manager.generate_conversation_id()
     history = await memory_manager.get_history(conversation_id)
@@ -120,15 +107,38 @@ def _get_system_prompt(request: ChatRequest) -> str:
 @app.get("/health")
 async def health_check(db: AsyncSession = Depends(get_db)):
     try:
+        # Check DB connection
         await db.execute("SELECT 1")
+
+        # Check Redis connection
+        redis_client = redis.from_url(config.REDIS_URL)
+        await redis_client.ping()
+
     except Exception as e:
-        logger.error("Database connection failed", error=str(e))
-        raise HTTPException(status_code=503, detail="Database connection failed.")
-    # Redis is no longer a direct dependency for caching, but is used for rate limiting.
-    # The health check will pass if the app can start, and rate limiting issues will appear in logs.
+        logger.error("Health check failed", error=str(e))
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
+
     return {"status": "ok"}
 
-@app.post("/chat", response_model=ChatResponse)
+def validate_request_parameters(request: ChatRequest, user: User | None):
+    """Validates request parameters based on user tier."""
+    if not request.parameters or not request.parameters.max_tokens:
+        return
+
+    tier = user.tier if user else "free"
+    max_allowed = config.MAX_TOKENS_FREE_TIER
+    if tier == "pro":
+        max_allowed = config.MAX_TOKENS_PRO_TIER
+    elif tier == "enterprise":
+        max_allowed = config.MAX_TOKENS_ENTERPRISE_TIER
+
+    if request.parameters.max_tokens > max_allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_tokens ({request.parameters.max_tokens}) exceeds the limit for your tier ({max_allowed})."
+        )
+
+@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_scope("chat")), Depends(enforce_budget)])
 async def chat(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -139,6 +149,7 @@ async def chat(
     guardrail_manager: GuardrailManager = Depends(get_guardrail_manager),
 ):
     await apply_rate_limit(user)
+    validate_request_parameters(request, user)
 
     user_id = user.id if user else "global_unauthenticated_user"
     conversation_id, full_conversation = await _process_request(request, memory_manager, user_id)
@@ -157,6 +168,33 @@ async def chat(
     platform_sequence = provider.get_platform_sequence(request.platform)
     masked_conversation = mask_pii_in_messages(full_conversation)
 
+    try:
+        response_text, token_usage, platform_name, model_name, latency_ms = await _try_platforms_with_retry(
+            platform_sequence, masked_conversation, request, system_prompt
+        )
+
+        user_message = full_conversation[-1]
+        assistant_message = Message(role="assistant", content=response_text)
+        await memory_manager.add_message(conversation_id, user_message, user_id)
+        await memory_manager.add_message(conversation_id, assistant_message, user_id)
+
+        await cache_manager.set(full_conversation, response_text)
+
+        if user:
+            log_usage_task.delay(user.id, platform_name, token_usage.dict(), latency_ms, model_name)
+
+        logger.info("AI call successful after retries", platform=platform_name, conversation_id=conversation_id)
+        return ChatResponse(response=response_text, conversation_id=conversation_id, token_usage=token_usage)
+    except Exception as e:
+        logger.error("All AI platforms and retries failed", final_error=str(e))
+        raise HTTPException(status_code=500, detail=f"All AI platforms failed after retries. Last error: {e}")
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(2),
+    retry=retry_if_exception_type((Exception))
+)
+async def _try_platforms_with_retry(platform_sequence, masked_conversation, request, system_prompt):
     last_error = None
     start_time = time.time()
     for ai_platform in platform_sequence:
@@ -172,30 +210,16 @@ async def chat(
                 json_mode=request.json_mode,
             )
             latency_ms = (time.time() - start_time) * 1000
-
-            user_message = full_conversation[-1]
-            assistant_message = Message(role="assistant", content=response_text)
-            await memory_manager.add_message(conversation_id, user_message, user_id)
-            await memory_manager.add_message(conversation_id, assistant_message, user_id)
-
-            await cache_manager.set(full_conversation, response_text)
-
-            if user:
-                background_tasks.add_task(log_usage, user.id, platform_name, token_usage, latency_ms, ai_platform.model_name)
-
-            logger.info("AI call successful", platform=platform_name, conversation_id=conversation_id)
-            return ChatResponse(response=response_text, conversation_id=conversation_id, token_usage=token_usage)
+            return response_text, token_usage, platform_name, ai_platform.model_name, latency_ms
         except pybreaker.CircuitBreakerError as e:
             last_error = e
-            logger.warn("Circuit breaker open for platform", platform=platform_name, error=str(e))
+            logger.warn("Circuit breaker open", platform=platform_name)
             continue
         except Exception as e:
             last_error = e
-            logger.error("AI platform failed", platform=ai_platform.__class__.__name__, error=str(e))
+            logger.error("AI platform failed", platform=platform_name, error=str(e))
             continue
-
-    logger.error("All AI platforms failed", last_error=str(last_error))
-    raise HTTPException(status_code=500, detail=f"All AI platforms failed. Last error: {last_error}")
+    raise last_error or Exception("No AI platforms available")
 
 async def stream_generator(stream, conversation_id: str, original_conversation: List[Message], memory_manager: MemoryManager, user_id: str, platform: str, model_name: str, start_time: float, background_tasks: BackgroundTasks):
     full_response = ""
@@ -213,14 +237,19 @@ async def stream_generator(stream, conversation_id: str, original_conversation: 
     await cache_manager.set(original_conversation, full_response)
 
     if user_id != "global_unauthenticated_user":
+        # Accurate token counting after the full response is buffered
         prompt_tokens = count_tokens(original_conversation, model_name)
         completion_tokens = count_tokens([assistant_message], model_name)
-        token_usage = TokenUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=prompt_tokens + completion_tokens)
-        background_tasks.add_task(log_usage, user_id, platform, token_usage, latency_ms, model_name)
+        token_usage = TokenUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens
+        )
+        log_usage_task.delay(user_id, platform, token_usage.dict(), latency_ms, model_name)
 
     logger.info("Streaming response completed", conversation_id=conversation_id, platform=platform)
 
-@app.post("/chat/stream")
+@app.post("/chat/stream", dependencies=[Depends(require_scope("chat")), Depends(enforce_budget)])
 async def chat_stream(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -231,6 +260,7 @@ async def chat_stream(
     guardrail_manager: GuardrailManager = Depends(get_guardrail_manager),
 ):
     await apply_rate_limit(user)
+    validate_request_parameters(request, user)
 
     user_id = user.id if user else "global_unauthenticated_user"
     conversation_id, full_conversation = await _process_request(request, memory_manager, user_id)
