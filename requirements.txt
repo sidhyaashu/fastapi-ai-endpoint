@@ -19,3 +19,9 @@ pybreaker
 asyncpg
 pgvector
 sentence-transformers
+pytest
+pytest-asyncio
+respx
+passlib[bcrypt]
+tenacity
+celery[redis]

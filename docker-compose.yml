@@ -1,26 +1,6 @@
 version: '3.8'
 
 services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    depends_on:
-      - postgres
-      - redis
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/mydatabase
-      - SYNC_DATABASE_URL=postgresql://user:password@postgres:5432/mydatabase
-      - REDIS_URL=redis://redis:6379
-      # Pass through other environment variables from a .env file
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - DEFAULT_PLATFORM=${DEFAULT_PLATFORM}
-      - FALLBACK_PLATFORMS=${FALLBACK_PLATFORMS}
-      - SECRET_KEY=${SECRET_KEY}
-
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -31,15 +11,66 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    command: postgres -c "shared_preload_libraries='pg_stat_statements'"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d mydatabase"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
-    image: redis:6
+    image: redis:7
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      - ASYNC_DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/mydatabase
+      - SYNC_DATABASE_URL=postgresql://user:password@postgres:5432/mydatabase
+      - REDIS_URL=redis://redis:6379
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - DEFAULT_PLATFORM=${DEFAULT_PLATFORM}
+      - FALLBACK_PLATFORMS=${FALLBACK_PLATFORMS}
+      - SECRET_KEY=${SECRET_KEY}
+      - GUARDRAIL_BLOCK_THRESHOLD=${GUARDRAIL_BLOCK_THRESHOLD}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build: .
+    command: celery -A src.tasks.celery_app worker --loglevel=info
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      - ASYNC_DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/mydatabase
+      - SYNC_DATABASE_URL=postgresql://user:password@postgres:5432/mydatabase
+      - REDIS_URL=redis://redis:6379
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
 
 volumes:
   postgres_data:
-  redis_data:

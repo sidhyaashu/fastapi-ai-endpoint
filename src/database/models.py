@@ -12,6 +12,9 @@ class User(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     username = Column(String, unique=True, index=True, nullable=False)
     tier = Column(String, default="free", nullable=False)
+    monthly_budget = Column(Float, nullable=True) # Max spend per month
+    monthly_spending = Column(Float, default=0.0, nullable=False)
+    last_usage_reset = Column(DateTime(timezone=True), server_default=func.now())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     encrypted_openai_api_key = Column(LargeBinary, nullable=True)
@@ -31,14 +34,27 @@ class User(Base):
         encrypted_key = getattr(self, f"encrypted_{platform}_api_key")
         return decrypt_key(encrypted_key) if encrypted_key else None
 
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 class APIKey(Base):
     __tablename__ = "api_keys"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    key = Column(String, unique=True, index=True, nullable=False)
+    key_prefix = Column(String, unique=True, index=True, nullable=False)
+    hashed_key = Column(String, unique=True, index=True, nullable=False)
+    scopes = Column(String, nullable=False, default="chat analytics")
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="api_keys")
+
+    def set_key(self, key: str):
+        self.key_prefix = key[:8]
+        self.hashed_key = pwd_context.hash(key)
+
+    def verify_key(self, key: str) -> bool:
+        return pwd_context.verify(key, self.hashed_key)
 
 class Conversation(Base):
     __tablename__ = "conversations"
